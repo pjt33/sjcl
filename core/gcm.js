@@ -1,6 +1,7 @@
 /** @fileOverview GCM mode implementation.
  *
  * @author Juho Vähä-Herttua
+ * @author Peter Taylor
  */
 
 /** @namespace Galois/Counter mode. */
@@ -62,50 +63,54 @@ sjcl.mode.gcm = {
     return out.data;
   },
 
-  /* Compute the galois multiplication of X and Y
+  /** Precompute a table for optimised Galois multiplication; this is the "simple 8-bit tables"
+   * approach described in http://csrc.nist.gov/groups/ST/toolkit/BCM/documents/proposedmodes/gcm/gcm-spec.pdf
    * @private
    */
-  _galoisMultiply: function (x, y) {
-    var i, j, xi, Zi, Vi, lsb_Vi, w=sjcl.bitArray, xor=w._xor4;
-
-    Zi = [0,0,0,0];
-    Vi = y.slice(0);
-
-    // Block size is 128 bits, run 128 times to get Z_128
-    for (i=0; i<128; i++) {
-      xi = (x[Math.floor(i/32)] & (1 << (31-i%32))) !== 0;
-      if (xi) {
-        // Z_i+1 = Z_i ^ V_i
-        Zi = xor(Zi, Vi);
-      }
-
-      // Store the value of LSB(V_i)
-      lsb_Vi = (Vi[3] & 1) !== 0;
-
-      // V_i+1 = V_i >> 1
-      for (j=3; j>0; j--) {
-        Vi[j] = (Vi[j] >>> 1) | ((Vi[j-1]&1) << 31);
-      }
-      Vi[0] = Vi[0] >>> 1;
-
-      // If LSB(V_i) is 1, V_i+1 = (V_i >> 1) ^ R
-      if (lsb_Vi) {
-        Vi[0] = Vi[0] ^ (0xe1 << 24);
+  _precomputeGaloisTable: function(y) {
+    var premul=[], i, j, k, prev, zero=[0,0,0,0], xor=sjcl.bitArray._xor4;
+    for (i=0; i<16; i++) {
+      premul[i]=[];
+      for (j=0; j<256; j++) {
+        premul[i][j] = zero;
       }
     }
-    return Zi;
+
+    // The powers of two are simple shifts modulo the field polynomial
+    prev = premul[0][0x80] = y.slice(0);
+    for (i=1; i<128; i++) {
+      prev = premul[i>>>3][0x80>>>(i&7)] = [
+        (prev[0]>>>1) ^  (prev[3]&1)*0xe1000000,
+        (prev[1]>>>1) | ((prev[0]&1)<<31),
+        (prev[2]>>>1) | ((prev[1]&1)<<31),
+        (prev[3]>>>1) | ((prev[2]&1)<<31)
+      ];
+    }
+
+    // Fill in the non-powers of 2 by linearity
+    for (i=0; i<16; i++) {
+      for (j=2; j<256; j<<=1) {
+        for (k=1; k<j; k++) {
+          premul[i][j+k] = xor(premul[i][j], premul[i][k]);
+        }
+      }
+    }
+    return premul;
   },
 
-  _ghash: function(H, Y0, data) {
-    var Yi, i, l = data.length;
-
-    Yi = Y0.slice(0);
+  _ghash: function(premul, Y0, data) {
+    var Yi=Y0.slice(0), i, j, Zi, l=data.length, xor=sjcl.bitArray._xor4;
     for (i=0; i<l; i+=4) {
       Yi[0] ^= 0xffffffff&data[i];
       Yi[1] ^= 0xffffffff&data[i+1];
       Yi[2] ^= 0xffffffff&data[i+2];
       Yi[3] ^= 0xffffffff&data[i+3];
-      Yi = sjcl.mode.gcm._galoisMultiply(Yi, H);
+
+      Zi = [0,0,0,0];
+      for (j=0; j<16; j++) {
+        Zi = xor(Zi, premul[j][Yi[j>>>2]>>>(8*(3-j&3)) & 255]);
+      }
+      Yi = Zi;
     }
     return Yi;
   },
@@ -120,7 +125,7 @@ sjcl.mode.gcm = {
    * @param {Number} tlen The length of the tag, in bits.
    */
   _ctrMode: function(encrypt, prf, data, adata, iv, tlen) {
-    var H, J0, S0, enc, i, ctr, tag, last, l, bl, abl, ivbl, w=sjcl.bitArray, xor=w._xor4;
+    var H, premul, J0, S0, enc, i, ctr, tag, last, l, bl, abl, ivbl, w=sjcl.bitArray, ghash=sjcl.mode.gcm._ghash;
 
     // Calculate data lengths
     l = data.length;
@@ -130,14 +135,15 @@ sjcl.mode.gcm = {
 
     // Calculate the parameters
     H = prf.encrypt([0,0,0,0]);
+    premul = sjcl.mode.gcm._precomputeGaloisTable(H);
     if (ivbl === 96) {
       J0 = iv.slice(0);
       J0 = w.concat(J0, [1]);
     } else {
-      J0 = sjcl.mode.gcm._ghash(H, [0,0,0,0], iv);
-      J0 = sjcl.mode.gcm._ghash(H, J0, [0,0,Math.floor(ivbl/0x100000000),ivbl&0xffffffff]);
+      J0 = ghash(premul, [0,0,0,0], iv);
+      J0 = ghash(premul, J0, [0,0,Math.floor(ivbl/0x100000000),ivbl&0xffffffff]);
     }
-    S0 = sjcl.mode.gcm._ghash(H, [0,0,0,0], adata);
+    S0 = ghash(premul, [0,0,0,0], adata);
 
     // Initialize ctr and tag
     ctr = J0.slice(0);
@@ -145,7 +151,7 @@ sjcl.mode.gcm = {
 
     // If decrypting, calculate hash
     if (!encrypt) {
-      tag = sjcl.mode.gcm._ghash(H, S0, data);
+      tag = ghash(premul, S0, data);
     }
 
     // Encrypt all the data
@@ -161,7 +167,7 @@ sjcl.mode.gcm = {
 
     // If encrypting, calculate hash
     if (encrypt) {
-      tag = sjcl.mode.gcm._ghash(H, S0, data);
+      tag = ghash(premul, S0, data);
     }
 
     // Calculate last block from bit lengths, ugly because bitwise operations are 32-bit
@@ -171,7 +177,7 @@ sjcl.mode.gcm = {
     ];
 
     // Calculate the final tag block
-    tag = sjcl.mode.gcm._ghash(H, tag, last);
+    tag = ghash(premul, tag, last);
     enc = prf.encrypt(J0);
     tag[0] ^= enc[0];
     tag[1] ^= enc[1];
