@@ -40,6 +40,7 @@
  * look for improvements in future versions.
  * </p>
  */
+/*global Uint32Array, crypto */
 sjcl.prng = function(defaultParanoia) {
   
   /* private */
@@ -74,7 +75,7 @@ sjcl.prng = function(defaultParanoia) {
   this._PARANOIA_LEVELS         = [0,48,64,96,128,192,256,384,512,768,1024];
   this._MILLISECONDS_PER_RESEED = 30000;
   this._BITS_PER_RESEED         = 80;
-}
+};
  
 sjcl.prng.prototype = {
   /** Generate several random words, and return them in an array
@@ -119,7 +120,8 @@ sjcl.prng.prototype = {
       i, tmp,
       t = (new Date()).valueOf(),
       robin = this._robins[source],
-      oldReady = this.isReady(), err = 0;
+      oldReady = this.isReady(), err = 0,
+      objName;
       
     id = this._collectorIds[source];
     if (id === undefined) { id = this._collectorIds[source] = this._collectorIdNext ++; }
@@ -137,7 +139,7 @@ sjcl.prng.prototype = {
       break;
       
     case "object":
-      var objName = Object.prototype.toString.call(data);
+      objName = Object.prototype.toString.call(data);
       if (objName === "[object Uint32Array]") {
         tmp = [];
         for (i = 0; i < data.length; i++) {
@@ -149,7 +151,7 @@ sjcl.prng.prototype = {
           err = 1;
         }
         for (i=0; i<data.length && !err; i++) {
-          if (typeof(data[i]) != "number") {
+          if (typeof(data[i]) !== "number") {
             err = 1;
           }
         }
@@ -403,4 +405,4 @@ sjcl.random = new sjcl.prng(6);
   } catch (e) {
     // no getRandomValues :-(
   }
-})();
+}());
